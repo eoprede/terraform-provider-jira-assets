@@ -33,6 +33,7 @@ func NewObjectResource() resource.Resource {
 type objectResource struct {
 	client       *assets.Client
 	workspace_id string
+	schema       []Schema
 }
 
 // Metadata returns the resource type name.
@@ -58,14 +59,40 @@ type objectResourceModel struct {
 	Updated     types.String `tfsdk:"updated"`
 	HasAvatar   types.Bool   `tfsdk:"has_avatar"`
 
-	TypeId     types.String              `tfsdk:"type_id"`
+	Type       types.String              `tfsdk:"type"`
 	Attributes []objectAttrResourceModel `tfsdk:"attributes"`
 	AvatarUuid types.String              `tfsdk:"avatar_uuid"`
 }
 
 type objectAttrResourceModel struct {
-	AttrTypeId types.String `tfsdk:"attr_type_id"`
-	AttrValue  types.String `tfsdk:"attr_value"`
+	AttrType  types.String `tfsdk:"attr_type"`
+	AttrValue types.String `tfsdk:"attr_value"`
+}
+
+func GetTypeIDByName(data []Schema, name string) string {
+	for _, d := range data {
+		for _, t := range d.Types {
+			if t.Name == name {
+				return t.ID
+			}
+		}
+	}
+	return ""
+}
+
+func GetAttributeIDByName(data []Schema, name string, type_id string) string {
+	for _, d := range data {
+		for _, t := range d.Types {
+			if t.ID == type_id {
+				for _, a := range t.Attributes {
+					if a.Name == name {
+						return a.ID
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // Schema defines the schema for the resource.
@@ -108,7 +135,7 @@ func (r *objectResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"type_id": schema.StringAttribute{
+			"type": schema.StringAttribute{
 				Required: true,
 			},
 			"attributes": schema.SetNestedAttribute{
@@ -116,7 +143,7 @@ func (r *objectResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Description: "The definition of the attribute that is associated with an object type",
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
-						"attr_type_id": schema.StringAttribute{
+						"attr_type": schema.StringAttribute{
 							Description: "The type of the attribute. The type decides how this value should be interpreted",
 							Required:    true,
 						},
@@ -159,10 +186,12 @@ func (r *objectResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
+	object_type_id := GetTypeIDByName(r.schema, plan.Type.ValueString())
+
 	var attributes []*models.ObjectPayloadAttributeScheme
 	for _, attr := range plan.Attributes {
 		attributes = append(attributes, &models.ObjectPayloadAttributeScheme{
-			ObjectTypeAttributeID: attr.AttrTypeId.ValueString(),
+			ObjectTypeAttributeID: GetAttributeIDByName(r.schema, attr.AttrType.ValueString(), object_type_id),
 			ObjectAttributeValues: []*models.ObjectPayloadAttributeValueScheme{
 				{
 					Value: attr.AttrValue.ValueString(),
@@ -173,7 +202,7 @@ func (r *objectResource) Create(ctx context.Context, req resource.CreateRequest,
 
 	// create payload
 	payload := &models.ObjectPayloadScheme{
-		ObjectTypeID: plan.TypeId.ValueString(),
+		ObjectTypeID: object_type_id,
 		Attributes:   attributes,
 		HasAvatar:    plan.HasAvatar.ValueBool(),
 		AvatarUUID:   plan.AvatarUuid.ValueString(),
@@ -268,10 +297,10 @@ func (r *objectResource) Read(ctx context.Context, req resource.ReadRequest, res
 		// and "updated". we don't know the type id of those attributes, so we can't exclude them specifically
 
 		for i := range state.Attributes {
-			if state.Attributes[i].AttrTypeId == types.StringValue(attr.ObjectTypeAttributeId) {
+			if state.Attributes[i].AttrType == types.StringValue(attr.ObjectTypeAttribute.Name) {
 				attributes = append(attributes, objectAttrResourceModel{
-					AttrTypeId: types.StringValue(attr.ObjectTypeAttributeId),
-					AttrValue:  types.StringValue(attr.ObjectAttributeValues[0].Value),
+					AttrType:  types.StringValue(attr.ObjectTypeAttribute.Name),
+					AttrValue: types.StringValue(attr.ObjectAttributeValues[0].Value),
 				})
 			}
 		}
@@ -303,13 +332,15 @@ func (r *objectResource) Update(ctx context.Context, req resource.UpdateRequest,
 		return
 	}
 
+	object_type_id := GetTypeIDByName(r.schema, plan.Type.ValueString())
+
 	// Generate API request body from plan
 	// if an attribute is removed from plan, it will not be removed from the object
 	// this is due to how the API only partially updates the object
 	var attributes []*models.ObjectPayloadAttributeScheme
 	for _, attr := range plan.Attributes {
 		attributes = append(attributes, &models.ObjectPayloadAttributeScheme{
-			ObjectTypeAttributeID: attr.AttrTypeId.ValueString(),
+			ObjectTypeAttributeID: GetAttributeIDByName(r.schema, attr.AttrType.ValueString(), object_type_id),
 			ObjectAttributeValues: []*models.ObjectPayloadAttributeValueScheme{
 				{
 					Value: attr.AttrValue.ValueString(),
@@ -320,7 +351,7 @@ func (r *objectResource) Update(ctx context.Context, req resource.UpdateRequest,
 
 	// create payload
 	payload := &models.ObjectPayloadScheme{
-		ObjectTypeID: plan.TypeId.ValueString(),
+		ObjectTypeID: object_type_id,
 		Attributes:   attributes,
 		HasAvatar:    plan.HasAvatar.ValueBool(),
 		AvatarUUID:   plan.AvatarUuid.ValueString(),
@@ -416,4 +447,5 @@ func (r *objectResource) Configure(ctx context.Context, req resource.ConfigureRe
 
 	r.client = providerClient.client
 	r.workspace_id = providerClient.workspaceId
+	r.schema = providerClient.schema
 }

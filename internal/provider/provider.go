@@ -5,6 +5,8 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -43,12 +45,42 @@ type JiraAssetsProviderModel struct {
 	WorkspaceId types.String `tfsdk:"workspace_id"`
 	User        types.String `tfsdk:"user"`
 	Password    types.String `tfsdk:"password"`
+	SchemaFile  types.String `tfsdk:"schema_file"`
+}
+
+// Some structures to hopefully pass schema to provider
+type Schema struct {
+	ID    string
+	Name  string
+	Types []Type
+}
+
+type Type struct {
+	ID         string
+	Name       string
+	Attributes []Attribute
+}
+
+type Attribute struct {
+	ID   string
+	Name string
 }
 
 // JiraAssetsProviderClient describes client and worksapceId.
 type JiraAssetsProviderClient struct {
 	client      *assets.Client
 	workspaceId string
+	schema      []Schema
+}
+
+func ReadSchemaFile(schemaFile string) []Schema {
+	plan, _ := os.ReadFile(schemaFile)
+	var data = []Schema{}
+	err := json.Unmarshal(plan, &data)
+	if err != nil {
+		fmt.Println(err)
+	}
+	return data
 }
 
 func (p *JiraAssetsProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -72,6 +104,10 @@ func (p *JiraAssetsProvider) Schema(ctx context.Context, req provider.SchemaRequ
 				MarkdownDescription: "Personal access token for the admin or service account.",
 				Optional:            true,
 				Sensitive:           true,
+			},
+			"schema_file": schema.StringAttribute{
+				MarkdownDescription: "Path to a JSON schema file to use for ID to name mapping.",
+				Optional:            true,
 			},
 		},
 	}
@@ -117,6 +153,15 @@ func (p *JiraAssetsProvider) Configure(ctx context.Context, req provider.Configu
 		)
 	}
 
+	if config.SchemaFile.IsUnknown() {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("schemaFile"),
+			"Unknown Assets Schema File",
+			"The provider cannot create the Assets API client as there is an unknown configuration value for the Assets API schema file. "+
+				"Either target apply the source of the value first, set the value statically in the configuration, or use the JIRAASSETS_SCHEMA_FILE environment variable.",
+		)
+	}
+
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -126,6 +171,7 @@ func (p *JiraAssetsProvider) Configure(ctx context.Context, req provider.Configu
 	workspaceId := os.Getenv("JIRAASSETS_WORKSPACE_ID")
 	user := os.Getenv("JIRAASSETS_USER")
 	password := os.Getenv("JIRAASSETS_PASSWORD")
+	schemaFile := os.Getenv("JIRAASSETS_SCHEMA_FILE")
 
 	if !config.WorkspaceId.IsNull() {
 		workspaceId = config.WorkspaceId.ValueString()
@@ -137,6 +183,10 @@ func (p *JiraAssetsProvider) Configure(ctx context.Context, req provider.Configu
 
 	if !config.Password.IsNull() {
 		password = config.Password.ValueString()
+	}
+
+	if !config.SchemaFile.IsNull() {
+		schemaFile = config.SchemaFile.ValueString()
 	}
 
 	// If any of the expected configurations are missing, return errors with provider-specific guidance.
@@ -199,6 +249,7 @@ func (p *JiraAssetsProvider) Configure(ctx context.Context, req provider.Configu
 	providerClient := JiraAssetsProviderClient{
 		client:      client,
 		workspaceId: workspaceId,
+		schema:      ReadSchemaFile(schemaFile),
 	}
 
 	resp.DataSourceData = providerClient
