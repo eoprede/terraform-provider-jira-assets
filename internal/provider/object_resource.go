@@ -61,15 +61,15 @@ type objectResourceModel struct {
 	Updated     types.String `tfsdk:"updated"`
 	HasAvatar   types.Bool   `tfsdk:"has_avatar"`
 
-	Type       types.String              `tfsdk:"type"`
-	Attributes []objectAttrResourceModel `tfsdk:"attributes"`
-	AvatarUuid types.String              `tfsdk:"avatar_uuid"`
+	Type       types.String `tfsdk:"type"`
+	Attributes types.Map    `tfsdk:"attributes"`
+	AvatarUuid types.String `tfsdk:"avatar_uuid"`
 }
 
-type objectAttrResourceModel struct {
-	AttrType  types.String `tfsdk:"attr_type"`
-	AttrValue types.String `tfsdk:"attr_value"`
-}
+// type objectAttrResourceModel struct {
+// 	AttrType  types.String `tfsdk:"attr_type"`
+// 	AttrValue types.String `tfsdk:"attr_value"`
+// }
 
 func GetTypeIDByName(data []Schema, name string) string {
 	for _, d := range data {
@@ -140,21 +140,10 @@ func (r *objectResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			"type": schema.StringAttribute{
 				Required: true,
 			},
-			"attributes": schema.SetNestedAttribute{
+			"attributes": schema.MapAttribute{
 				Required:    true,
-				Description: "The definition of the attribute that is associated with an object type",
-				NestedObject: schema.NestedAttributeObject{
-					Attributes: map[string]schema.Attribute{
-						"attr_type": schema.StringAttribute{
-							Description: "The type of the attribute. The type decides how this value should be interpreted",
-							Required:    true,
-						},
-						"attr_value": schema.StringAttribute{
-							Description: "The actual values of the object attribute. The size of the values array is determined by the cardinality constraints on the object type attribute as well as how many values are associated with the object attribute",
-							Required:    true,
-						},
-					},
-				},
+				Description: "Kay value pairs of the attributes of the object",
+				ElementType: types.StringType,
 			},
 			"created": schema.StringAttribute{
 				Computed: true,
@@ -190,13 +179,16 @@ func (r *objectResource) Create(ctx context.Context, req resource.CreateRequest,
 
 	object_type_id := GetTypeIDByName(r.schema, plan.Type.ValueString())
 
+	elements := make(map[string]types.String, len(plan.Attributes.Elements()))
+	plan.Attributes.ElementsAs(ctx, &elements, false)
+
 	var attributes []*models.ObjectPayloadAttributeScheme
-	for _, attr := range plan.Attributes {
+	for attr_type, attr_value := range elements {
 		attributes = append(attributes, &models.ObjectPayloadAttributeScheme{
-			ObjectTypeAttributeID: GetAttributeIDByName(r.schema, attr.AttrType.ValueString(), object_type_id),
+			ObjectTypeAttributeID: GetAttributeIDByName(r.schema, attr_type, object_type_id),
 			ObjectAttributeValues: []*models.ObjectPayloadAttributeValueScheme{
 				{
-					Value: attr.AttrValue.ValueString(),
+					Value: attr_value.ValueString(),
 				},
 			},
 		})
@@ -292,22 +284,18 @@ func (r *objectResource) Read(ctx context.Context, req resource.ReadRequest, res
 		)
 		return
 	}
-
-	var attributes []objectAttrResourceModel
+	attributes := make(map[string]string)
 	for _, attr := range attrs {
 		// only map known attributes in the state, this is because the API return computed attributes like "key", "created",
 		// and "updated". CI Class in my instance also messes up the state
 		ignore_keys := []string{"Created", "Key", "Updated", "CI Class"}
 		if !(slices.Contains(ignore_keys, attr.ObjectTypeAttribute.Name)) {
-			attributes = append(attributes, objectAttrResourceModel{
-				AttrType:  types.StringValue(attr.ObjectTypeAttribute.Name),
-				AttrValue: types.StringValue(attr.ObjectAttributeValues[0].Value),
-			})
+			attributes[attr.ObjectTypeAttribute.Name] = attr.ObjectAttributeValues[0].Value
 		}
 	}
-
+	mapValue, _ := types.MapValueFrom(ctx, types.StringType, attributes)
 	// Overwrite items in state with refreshed values
-	state.Attributes = attributes
+	state.Attributes = mapValue
 	state.WorkspaceId = types.StringValue(object.WorkspaceId)
 	state.GlobalId = types.StringValue(object.GlobalId)
 	state.Id = types.StringValue(object.ID)
@@ -338,13 +326,15 @@ func (r *objectResource) Update(ctx context.Context, req resource.UpdateRequest,
 	// Generate API request body from plan
 	// if an attribute is removed from plan, it will not be removed from the object
 	// this is due to how the API only partially updates the object
+	elements := make(map[string]types.String, len(plan.Attributes.Elements()))
+	plan.Attributes.ElementsAs(ctx, &elements, false)
 	var attributes []*models.ObjectPayloadAttributeScheme
-	for _, attr := range plan.Attributes {
+	for attr_type, attr_value := range elements {
 		attributes = append(attributes, &models.ObjectPayloadAttributeScheme{
-			ObjectTypeAttributeID: GetAttributeIDByName(r.schema, attr.AttrType.ValueString(), object_type_id),
+			ObjectTypeAttributeID: GetAttributeIDByName(r.schema, attr_type, object_type_id),
 			ObjectAttributeValues: []*models.ObjectPayloadAttributeValueScheme{
 				{
-					Value: attr.AttrValue.ValueString(),
+					Value: attr_value.ValueString(),
 				},
 			},
 		})
