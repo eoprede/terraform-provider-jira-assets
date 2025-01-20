@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/ctreminiom/go-atlassian/assets"
 	"github.com/ctreminiom/go-atlassian/pkg/infra/models"
@@ -38,7 +39,8 @@ type objectResource struct {
 
 // Metadata returns the resource type name.
 func (r *objectResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_object"
+	// resp.TypeName = req.ProviderTypeName + "_object"
+	resp.TypeName = "jiraassets_object"
 }
 
 type objectResourceModel struct {
@@ -294,15 +296,13 @@ func (r *objectResource) Read(ctx context.Context, req resource.ReadRequest, res
 	var attributes []objectAttrResourceModel
 	for _, attr := range attrs {
 		// only map known attributes in the state, this is because the API return computed attributes like "key", "created",
-		// and "updated". we don't know the type id of those attributes, so we can't exclude them specifically
-
-		for i := range state.Attributes {
-			if state.Attributes[i].AttrType == types.StringValue(attr.ObjectTypeAttribute.Name) {
-				attributes = append(attributes, objectAttrResourceModel{
-					AttrType:  types.StringValue(attr.ObjectTypeAttribute.Name),
-					AttrValue: types.StringValue(attr.ObjectAttributeValues[0].Value),
-				})
-			}
+		// and "updated". CI Class in my instance also messes up the state
+		ignore_keys := []string{"Created", "Key", "Updated", "CI Class"}
+		if !(slices.Contains(ignore_keys, attr.ObjectTypeAttribute.Name)) {
+			attributes = append(attributes, objectAttrResourceModel{
+				AttrType:  types.StringValue(attr.ObjectTypeAttribute.Name),
+				AttrValue: types.StringValue(attr.ObjectAttributeValues[0].Value),
+			})
 		}
 	}
 
@@ -314,6 +314,7 @@ func (r *objectResource) Read(ctx context.Context, req resource.ReadRequest, res
 	state.Label = types.StringValue(object.Label)
 	state.ObjectKey = types.StringValue(object.ObjectKey)
 	state.HasAvatar = types.BoolValue(object.HasAvatar)
+	state.Type = types.StringValue(object.ObjectType.Name)
 
 	diags = resp.State.Set(ctx, state)
 	resp.Diagnostics.Append(diags...)
