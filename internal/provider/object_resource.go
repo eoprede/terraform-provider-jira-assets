@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/ctreminiom/go-atlassian/assets"
 	"github.com/ctreminiom/go-atlassian/pkg/infra/models"
@@ -33,11 +34,14 @@ func NewObjectResource() resource.Resource {
 type objectResource struct {
 	client       *assets.Client
 	workspace_id string
+	schema       []Schema
+	ignore_keys  []string
 }
 
 // Metadata returns the resource type name.
 func (r *objectResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_object"
+	// resp.TypeName = req.ProviderTypeName + "_object"
+	resp.TypeName = "jiraassets_object"
 }
 
 type objectResourceModel struct {
@@ -58,14 +62,40 @@ type objectResourceModel struct {
 	Updated     types.String `tfsdk:"updated"`
 	HasAvatar   types.Bool   `tfsdk:"has_avatar"`
 
-	TypeId     types.String              `tfsdk:"type_id"`
-	Attributes []objectAttrResourceModel `tfsdk:"attributes"`
-	AvatarUuid types.String              `tfsdk:"avatar_uuid"`
+	Type       types.String `tfsdk:"type"`
+	Attributes types.Map    `tfsdk:"attributes"`
+	AvatarUuid types.String `tfsdk:"avatar_uuid"`
 }
 
-type objectAttrResourceModel struct {
-	AttrTypeId types.String `tfsdk:"attr_type_id"`
-	AttrValue  types.String `tfsdk:"attr_value"`
+// type objectAttrResourceModel struct {
+// 	AttrType  types.String `tfsdk:"attr_type"`
+// 	AttrValue types.String `tfsdk:"attr_value"`
+// }
+
+func GetTypeIDByName(data []Schema, name string) string {
+	for _, d := range data {
+		for _, t := range d.Types {
+			if t.Name == name {
+				return t.ID
+			}
+		}
+	}
+	return ""
+}
+
+func GetAttributeIDByName(data []Schema, name string, type_id string) string {
+	for _, d := range data {
+		for _, t := range d.Types {
+			if t.ID == type_id {
+				for _, a := range t.Attributes {
+					if a.Name == name {
+						return a.ID
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // Schema defines the schema for the resource.
@@ -108,24 +138,13 @@ func (r *objectResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"type_id": schema.StringAttribute{
+			"type": schema.StringAttribute{
 				Required: true,
 			},
-			"attributes": schema.SetNestedAttribute{
+			"attributes": schema.MapAttribute{
 				Required:    true,
-				Description: "The definition of the attribute that is associated with an object type",
-				NestedObject: schema.NestedAttributeObject{
-					Attributes: map[string]schema.Attribute{
-						"attr_type_id": schema.StringAttribute{
-							Description: "The type of the attribute. The type decides how this value should be interpreted",
-							Required:    true,
-						},
-						"attr_value": schema.StringAttribute{
-							Description: "The actual values of the object attribute. The size of the values array is determined by the cardinality constraints on the object type attribute as well as how many values are associated with the object attribute",
-							Required:    true,
-						},
-					},
-				},
+				Description: "Kay value pairs of the attributes of the object",
+				ElementType: types.StringType,
 			},
 			"created": schema.StringAttribute{
 				Computed: true,
@@ -159,13 +178,18 @@ func (r *objectResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
+	object_type_id := GetTypeIDByName(r.schema, plan.Type.ValueString())
+
+	elements := make(map[string]types.String, len(plan.Attributes.Elements()))
+	plan.Attributes.ElementsAs(ctx, &elements, false)
+
 	var attributes []*models.ObjectPayloadAttributeScheme
-	for _, attr := range plan.Attributes {
+	for attr_type, attr_value := range elements {
 		attributes = append(attributes, &models.ObjectPayloadAttributeScheme{
-			ObjectTypeAttributeID: attr.AttrTypeId.ValueString(),
+			ObjectTypeAttributeID: GetAttributeIDByName(r.schema, attr_type, object_type_id),
 			ObjectAttributeValues: []*models.ObjectPayloadAttributeValueScheme{
 				{
-					Value: attr.AttrValue.ValueString(),
+					Value: attr_value.ValueString(),
 				},
 			},
 		})
@@ -173,7 +197,7 @@ func (r *objectResource) Create(ctx context.Context, req resource.CreateRequest,
 
 	// create payload
 	payload := &models.ObjectPayloadScheme{
-		ObjectTypeID: plan.TypeId.ValueString(),
+		ObjectTypeID: object_type_id,
 		Attributes:   attributes,
 		HasAvatar:    plan.HasAvatar.ValueBool(),
 		AvatarUUID:   plan.AvatarUuid.ValueString(),
@@ -261,30 +285,25 @@ func (r *objectResource) Read(ctx context.Context, req resource.ReadRequest, res
 		)
 		return
 	}
-
-	var attributes []objectAttrResourceModel
+	attributes := make(map[string]string)
 	for _, attr := range attrs {
 		// only map known attributes in the state, this is because the API return computed attributes like "key", "created",
-		// and "updated". we don't know the type id of those attributes, so we can't exclude them specifically
-
-		for i := range state.Attributes {
-			if state.Attributes[i].AttrTypeId == types.StringValue(attr.ObjectTypeAttributeId) {
-				attributes = append(attributes, objectAttrResourceModel{
-					AttrTypeId: types.StringValue(attr.ObjectTypeAttributeId),
-					AttrValue:  types.StringValue(attr.ObjectAttributeValues[0].Value),
-				})
-			}
+		// and "updated". CI Class in my instance also messes up the state
+		ignore_keys := append([]string{"Created", "Key", "Updated"}, r.ignore_keys...)
+		if !(slices.Contains(ignore_keys, attr.ObjectTypeAttribute.Name)) {
+			attributes[attr.ObjectTypeAttribute.Name] = attr.ObjectAttributeValues[0].Value
 		}
 	}
-
+	mapValue, _ := types.MapValueFrom(ctx, types.StringType, attributes)
 	// Overwrite items in state with refreshed values
-	state.Attributes = attributes
+	state.Attributes = mapValue
 	state.WorkspaceId = types.StringValue(object.WorkspaceId)
 	state.GlobalId = types.StringValue(object.GlobalId)
 	state.Id = types.StringValue(object.ID)
 	state.Label = types.StringValue(object.Label)
 	state.ObjectKey = types.StringValue(object.ObjectKey)
 	state.HasAvatar = types.BoolValue(object.HasAvatar)
+	state.Type = types.StringValue(object.ObjectType.Name)
 
 	diags = resp.State.Set(ctx, state)
 	resp.Diagnostics.Append(diags...)
@@ -303,16 +322,20 @@ func (r *objectResource) Update(ctx context.Context, req resource.UpdateRequest,
 		return
 	}
 
+	object_type_id := GetTypeIDByName(r.schema, plan.Type.ValueString())
+
 	// Generate API request body from plan
 	// if an attribute is removed from plan, it will not be removed from the object
 	// this is due to how the API only partially updates the object
+	elements := make(map[string]types.String, len(plan.Attributes.Elements()))
+	plan.Attributes.ElementsAs(ctx, &elements, false)
 	var attributes []*models.ObjectPayloadAttributeScheme
-	for _, attr := range plan.Attributes {
+	for attr_type, attr_value := range elements {
 		attributes = append(attributes, &models.ObjectPayloadAttributeScheme{
-			ObjectTypeAttributeID: attr.AttrTypeId.ValueString(),
+			ObjectTypeAttributeID: GetAttributeIDByName(r.schema, attr_type, object_type_id),
 			ObjectAttributeValues: []*models.ObjectPayloadAttributeValueScheme{
 				{
-					Value: attr.AttrValue.ValueString(),
+					Value: attr_value.ValueString(),
 				},
 			},
 		})
@@ -320,7 +343,7 @@ func (r *objectResource) Update(ctx context.Context, req resource.UpdateRequest,
 
 	// create payload
 	payload := &models.ObjectPayloadScheme{
-		ObjectTypeID: plan.TypeId.ValueString(),
+		ObjectTypeID: object_type_id,
 		Attributes:   attributes,
 		HasAvatar:    plan.HasAvatar.ValueBool(),
 		AvatarUUID:   plan.AvatarUuid.ValueString(),
@@ -416,4 +439,6 @@ func (r *objectResource) Configure(ctx context.Context, req resource.ConfigureRe
 
 	r.client = providerClient.client
 	r.workspace_id = providerClient.workspaceId
+	r.schema = providerClient.schema
+	r.ignore_keys = providerClient.ignoreKeys
 }
