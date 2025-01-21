@@ -35,6 +35,7 @@ type objectResource struct {
 	client       *assets.Client
 	workspace_id string
 	schema       []Schema
+	ignore_keys  []string
 }
 
 // Metadata returns the resource type name.
@@ -288,7 +289,7 @@ func (r *objectResource) Read(ctx context.Context, req resource.ReadRequest, res
 	for _, attr := range attrs {
 		// only map known attributes in the state, this is because the API return computed attributes like "key", "created",
 		// and "updated". CI Class in my instance also messes up the state
-		ignore_keys := []string{"Created", "Key", "Updated", "CI Class"}
+		ignore_keys := append([]string{"Created", "Key", "Updated"}, r.ignore_keys...)
 		if !(slices.Contains(ignore_keys, attr.ObjectTypeAttribute.Name)) {
 			attributes[attr.ObjectTypeAttribute.Name] = attr.ObjectAttributeValues[0].Value
 		}
@@ -439,4 +440,5 @@ func (r *objectResource) Configure(ctx context.Context, req resource.ConfigureRe
 	r.client = providerClient.client
 	r.workspace_id = providerClient.workspaceId
 	r.schema = providerClient.schema
+	r.ignore_keys = providerClient.ignoreKeys
 }

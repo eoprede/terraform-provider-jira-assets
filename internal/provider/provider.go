@@ -46,6 +46,7 @@ type JiraAssetsProviderModel struct {
 	User        types.String `tfsdk:"user"`
 	Password    types.String `tfsdk:"password"`
 	SchemaFile  types.String `tfsdk:"schema_file"`
+	IgnoreKeys  []string     `tfsdk:"ignore_keys"`
 }
 
 // Some structures to hopefully pass schema to provider
@@ -71,6 +72,7 @@ type JiraAssetsProviderClient struct {
 	client      *assets.Client
 	workspaceId string
 	schema      []Schema
+	ignoreKeys  []string
 }
 
 func ReadSchemaFile(schemaFile string) []Schema {
@@ -107,6 +109,11 @@ func (p *JiraAssetsProvider) Schema(ctx context.Context, req provider.SchemaRequ
 			},
 			"schema_file": schema.StringAttribute{
 				MarkdownDescription: "Path to a JSON schema file to use for ID to name mapping.",
+				Optional:            true,
+			},
+			"ignore_keys": schema.ListAttribute{
+				MarkdownDescription: "List of keys to ignore when creating resources.",
+				ElementType:         types.StringType,
 				Optional:            true,
 			},
 		},
@@ -250,6 +257,7 @@ func (p *JiraAssetsProvider) Configure(ctx context.Context, req provider.Configu
 		client:      client,
 		workspaceId: workspaceId,
 		schema:      ReadSchemaFile(schemaFile),
+		ignoreKeys:  config.IgnoreKeys,
 	}
 
 	resp.DataSourceData = providerClient
