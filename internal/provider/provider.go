@@ -5,8 +5,7 @@ package provider
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+	"log"
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -18,6 +17,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 
 	"github.com/ctreminiom/go-atlassian/assets"
+	"github.com/ctreminiom/go-atlassian/pkg/infra/models"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -42,11 +42,11 @@ type JiraAssetsProvider struct {
 
 // JiraAssetsProviderModel describes the provider data model.
 type JiraAssetsProviderModel struct {
-	WorkspaceId types.String `tfsdk:"workspace_id"`
-	User        types.String `tfsdk:"user"`
-	Password    types.String `tfsdk:"password"`
-	SchemaFile  types.String `tfsdk:"schema_file"`
-	IgnoreKeys  []string     `tfsdk:"ignore_keys"`
+	WorkspaceId    types.String `tfsdk:"workspace_id"`
+	User           types.String `tfsdk:"user"`
+	Password       types.String `tfsdk:"password"`
+	ObjectSchemaId types.String `tfsdk:"object_schema_id"`
+	IgnoreKeys     []string     `tfsdk:"ignore_keys"`
 }
 
 // Some structures to hopefully pass schema to provider
@@ -69,20 +69,49 @@ type Attribute struct {
 
 // JiraAssetsProviderClient describes client and worksapceId.
 type JiraAssetsProviderClient struct {
-	client      *assets.Client
-	workspaceId string
-	schema      []Schema
-	ignoreKeys  []string
+	client                 *assets.Client
+	workspaceId            string
+	objectschemaId         string
+	ignoreKeys             []string
+	objectSchemaTypes      []*models.ObjectTypeScheme
+	objectSchemaAttributes map[string][]*models.ObjectTypeAttributeScheme
 }
 
-func ReadSchemaFile(schemaFile string) []Schema {
-	plan, _ := os.ReadFile(schemaFile)
-	var data = []Schema{}
-	err := json.Unmarshal(plan, &data)
-	if err != nil {
-		fmt.Println(err)
+func getObjectSchemaAttributes(asset *assets.Client, workSpaceID string, objectTypes []*models.ObjectTypeScheme) map[string][]*models.ObjectTypeAttributeScheme {
+	ret := make(map[string][]*models.ObjectTypeAttributeScheme)
+	options := &models.ObjectTypeAttributesParamsScheme{
+		OnlyValueEditable:       true,
+		OrderByName:             false,
+		Query:                   "",
+		IncludeValuesExist:      false,
+		ExcludeParentAttributes: false,
+		IncludeChildren:         true,
+		OrderByRequired:         false,
 	}
-	return data
+	for _, objectType := range objectTypes {
+		attributes, response, err := asset.ObjectType.Attributes(context.Background(), workSpaceID, objectType.Id, options)
+		if err != nil {
+			if response != nil {
+				log.Println(response.Bytes.String())
+				log.Println("Endpoint:", response.Endpoint)
+			}
+			log.Fatal(err)
+		}
+		ret[objectType.Id] = attributes
+	}
+	return ret
+}
+
+func getObjectSchemaObjectTypes(asset *assets.Client, workSpaceID string, objsectSchemaID string) []*models.ObjectTypeScheme {
+	schema, response, err := asset.ObjectSchema.ObjectTypes(context.Background(), workSpaceID, objsectSchemaID, false)
+	if err != nil {
+		if response != nil {
+			log.Println(response.Bytes.String())
+			log.Println("Endpoint:", response.Endpoint)
+		}
+		log.Fatal(err)
+	}
+	return schema
 }
 
 func (p *JiraAssetsProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -107,8 +136,8 @@ func (p *JiraAssetsProvider) Schema(ctx context.Context, req provider.SchemaRequ
 				Optional:            true,
 				Sensitive:           true,
 			},
-			"schema_file": schema.StringAttribute{
-				MarkdownDescription: "Path to a JSON schema file to use for ID to name mapping.",
+			"object_schema_id": schema.StringAttribute{
+				MarkdownDescription: "ID of the object schema to use.",
 				Optional:            true,
 			},
 			"ignore_keys": schema.ListAttribute{
@@ -160,12 +189,12 @@ func (p *JiraAssetsProvider) Configure(ctx context.Context, req provider.Configu
 		)
 	}
 
-	if config.SchemaFile.IsUnknown() {
+	if config.ObjectSchemaId.IsUnknown() {
 		resp.Diagnostics.AddAttributeError(
-			path.Root("schemaFile"),
-			"Unknown Assets Schema File",
-			"The provider cannot create the Assets API client as there is an unknown configuration value for the Assets API schema file. "+
-				"Either target apply the source of the value first, set the value statically in the configuration, or use the JIRAASSETS_SCHEMA_FILE environment variable.",
+			path.Root("objectschemaId"),
+			"Unknown Asset objectschemaId",
+			"The provider cannot create the Assets API client as there is an unknown configuration value for the objectschemaId. "+
+				"Either target apply the source of the value first, set the value statically in the configuration, or use the JIRAASSETS_OBJECTSCHEMA_ID environment variable.",
 		)
 	}
 
@@ -178,7 +207,7 @@ func (p *JiraAssetsProvider) Configure(ctx context.Context, req provider.Configu
 	workspaceId := os.Getenv("JIRAASSETS_WORKSPACE_ID")
 	user := os.Getenv("JIRAASSETS_USER")
 	password := os.Getenv("JIRAASSETS_PASSWORD")
-	schemaFile := os.Getenv("JIRAASSETS_SCHEMA_FILE")
+	objectschemaId := os.Getenv("JIRAASSETS_OBJECTSCHEMA_ID")
 
 	if !config.WorkspaceId.IsNull() {
 		workspaceId = config.WorkspaceId.ValueString()
@@ -192,8 +221,8 @@ func (p *JiraAssetsProvider) Configure(ctx context.Context, req provider.Configu
 		password = config.Password.ValueString()
 	}
 
-	if !config.SchemaFile.IsNull() {
-		schemaFile = config.SchemaFile.ValueString()
+	if !config.ObjectSchemaId.IsNull() {
+		objectschemaId = config.ObjectSchemaId.ValueString()
 	}
 
 	// If any of the expected configurations are missing, return errors with provider-specific guidance.
@@ -235,6 +264,7 @@ func (p *JiraAssetsProvider) Configure(ctx context.Context, req provider.Configu
 	ctx = tflog.SetField(ctx, "jiraassets_workspace_id", workspaceId)
 	ctx = tflog.SetField(ctx, "jiraassets_user", user)
 	ctx = tflog.SetField(ctx, "jiraassets_password", password)
+	ctx = tflog.SetField(ctx, "jiraassets_objectschemaId", objectschemaId)
 	ctx = tflog.MaskFieldValuesWithFieldKeys(ctx, "jiraassets_password")
 
 	tflog.Debug(ctx, "Creating HashiCups client")
@@ -252,12 +282,18 @@ func (p *JiraAssetsProvider) Configure(ctx context.Context, req provider.Configu
 	// add authentication headers to the client, workspaceId is added to each request
 	client.Auth.SetBasicAuth(user, password)
 
+	// build shcme and attribute mappings
+	objectSchemaTypes := getObjectSchemaObjectTypes(client, workspaceId, objectschemaId)
+	objectSchemaAttributes := getObjectSchemaAttributes(client, workspaceId, objectSchemaTypes)
+
 	// add workspaceId to response to be used by resources and data sources
 	providerClient := JiraAssetsProviderClient{
-		client:      client,
-		workspaceId: workspaceId,
-		schema:      ReadSchemaFile(schemaFile),
-		ignoreKeys:  config.IgnoreKeys,
+		client:                 client,
+		workspaceId:            workspaceId,
+		objectschemaId:         objectschemaId,
+		ignoreKeys:             config.IgnoreKeys,
+		objectSchemaTypes:      objectSchemaTypes,
+		objectSchemaAttributes: objectSchemaAttributes,
 	}
 
 	resp.DataSourceData = providerClient

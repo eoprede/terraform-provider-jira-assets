@@ -32,10 +32,12 @@ func NewObjectResource() resource.Resource {
 
 // objectResource is the resource implementation.
 type objectResource struct {
-	client       *assets.Client
-	workspace_id string
-	schema       []Schema
-	ignore_keys  []string
+	client                 *assets.Client
+	workspaceId            string
+	objectschemaId         string
+	ignoreKeys             []string
+	objectSchemaTypes      []*models.ObjectTypeScheme
+	objectSchemaAttributes map[string][]*models.ObjectTypeAttributeScheme
 }
 
 // Metadata returns the resource type name.
@@ -72,30 +74,47 @@ type objectResourceModel struct {
 // 	AttrValue types.String `tfsdk:"attr_value"`
 // }
 
-func GetTypeIDByName(data []Schema, name string) string {
-	for _, d := range data {
-		for _, t := range d.Types {
-			if t.Name == name {
-				return t.ID
-			}
+func getObjectTypeByName(objName string, schema []*models.ObjectTypeScheme) *models.ObjectTypeScheme {
+	for _, obj := range schema {
+		if obj.Name == objName {
+			return obj
 		}
 	}
-	return ""
+	return &models.ObjectTypeScheme{}
 }
 
-func GetAttributeIDByName(data []Schema, name string, type_id string) string {
-	for _, d := range data {
-		for _, t := range d.Types {
-			if t.ID == type_id {
-				for _, a := range t.Attributes {
-					if a.Name == name {
-						return a.ID
-					}
-				}
-			}
+func getObjectAttributeByName(objName string, schema []*models.ObjectTypeAttributeScheme) *models.ObjectTypeAttributeScheme {
+	for _, obj := range schema {
+		if obj.Name == objName {
+			return obj
 		}
 	}
-	return ""
+	return &models.ObjectTypeAttributeScheme{}
+}
+
+func getAttributeValue(attr *models.ObjectAttributeScheme) (string, error) {
+	switch attr.ObjectTypeAttribute.Type {
+	case 1:
+		return attr.ObjectAttributeValues[0].SearchValue, nil
+	case 0:
+		return attr.ObjectAttributeValues[0].Value, nil
+	case 7:
+		return attr.ObjectAttributeValues[0].Status.ID, nil
+	default:
+		return "", fmt.Errorf("unsupported attribute type: %d", attr.ObjectTypeAttribute.Type)
+	}
+}
+
+func returnAttributePayloadValue(name string, value string, objectSchemaAttributes []*models.ObjectTypeAttributeScheme) *models.ObjectPayloadAttributeScheme {
+	attrSchema := getObjectAttributeByName(name, objectSchemaAttributes)
+	return &models.ObjectPayloadAttributeScheme{
+		ObjectTypeAttributeID: attrSchema.ID,
+		ObjectAttributeValues: []*models.ObjectPayloadAttributeValueScheme{
+			{
+				Value: value,
+			},
+		},
+	}
 }
 
 // Schema defines the schema for the resource.
@@ -178,32 +197,25 @@ func (r *objectResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	object_type_id := GetTypeIDByName(r.schema, plan.Type.ValueString())
+	object_type_id := getObjectTypeByName(plan.Type.ValueString(), r.objectSchemaTypes)
 
 	elements := make(map[string]types.String, len(plan.Attributes.Elements()))
 	plan.Attributes.ElementsAs(ctx, &elements, false)
 
 	var attributes []*models.ObjectPayloadAttributeScheme
 	for attr_type, attr_value := range elements {
-		attributes = append(attributes, &models.ObjectPayloadAttributeScheme{
-			ObjectTypeAttributeID: GetAttributeIDByName(r.schema, attr_type, object_type_id),
-			ObjectAttributeValues: []*models.ObjectPayloadAttributeValueScheme{
-				{
-					Value: attr_value.ValueString(),
-				},
-			},
-		})
+		attributes = append(attributes, returnAttributePayloadValue(attr_type, attr_value.ValueString(), r.objectSchemaAttributes[object_type_id.Id]))
 	}
 
 	// create payload
 	payload := &models.ObjectPayloadScheme{
-		ObjectTypeID: object_type_id,
+		ObjectTypeID: object_type_id.Id,
 		Attributes:   attributes,
 		HasAvatar:    plan.HasAvatar.ValueBool(),
 		AvatarUUID:   plan.AvatarUuid.ValueString(),
 	}
 
-	object, response, err := r.client.Object.Create(ctx, r.workspace_id, payload)
+	object, response, err := r.client.Object.Create(ctx, r.workspaceId, payload)
 	if err != nil {
 		if response != nil {
 			tflog.Error(ctx, "Error creating object: %s", map[string]interface{}{
@@ -250,7 +262,7 @@ func (r *objectResource) Read(ctx context.Context, req resource.ReadRequest, res
 	}
 
 	// Get refreshed object from Assets API
-	object, response, err := r.client.Object.Get(ctx, r.workspace_id, state.Id.ValueString())
+	object, response, err := r.client.Object.Get(ctx, r.workspaceId, state.Id.ValueString())
 	if err != nil {
 		if response != nil {
 			tflog.Error(ctx, "Error reading object: %s", map[string]interface{}{
@@ -269,7 +281,7 @@ func (r *objectResource) Read(ctx context.Context, req resource.ReadRequest, res
 	}
 
 	// Get refreshed object attributes from Assets API
-	attrs, response, err := r.client.Object.Attributes(ctx, r.workspace_id, state.Id.ValueString())
+	attrs, response, err := r.client.Object.Attributes(ctx, r.workspaceId, state.Id.ValueString())
 	if err != nil {
 		if response != nil {
 			tflog.Error(ctx, "Error reading object attributes: %s", map[string]interface{}{
@@ -289,9 +301,9 @@ func (r *objectResource) Read(ctx context.Context, req resource.ReadRequest, res
 	for _, attr := range attrs {
 		// only map known attributes in the state, this is because the API return computed attributes like "key", "created",
 		// and "updated". CI Class in my instance also messes up the state
-		ignore_keys := append([]string{"Created", "Key", "Updated"}, r.ignore_keys...)
+		ignore_keys := append([]string{"Created", "Key", "Updated"}, r.ignoreKeys...)
 		if !(slices.Contains(ignore_keys, attr.ObjectTypeAttribute.Name)) {
-			attributes[attr.ObjectTypeAttribute.Name] = attr.ObjectAttributeValues[0].Value
+			attributes[attr.ObjectTypeAttribute.Name], _ = getAttributeValue(attr)
 		}
 	}
 	mapValue, _ := types.MapValueFrom(ctx, types.StringType, attributes)
@@ -322,7 +334,7 @@ func (r *objectResource) Update(ctx context.Context, req resource.UpdateRequest,
 		return
 	}
 
-	object_type_id := GetTypeIDByName(r.schema, plan.Type.ValueString())
+	object_type_id := getObjectTypeByName(plan.Type.ValueString(), r.objectSchemaTypes)
 
 	// Generate API request body from plan
 	// if an attribute is removed from plan, it will not be removed from the object
@@ -331,19 +343,12 @@ func (r *objectResource) Update(ctx context.Context, req resource.UpdateRequest,
 	plan.Attributes.ElementsAs(ctx, &elements, false)
 	var attributes []*models.ObjectPayloadAttributeScheme
 	for attr_type, attr_value := range elements {
-		attributes = append(attributes, &models.ObjectPayloadAttributeScheme{
-			ObjectTypeAttributeID: GetAttributeIDByName(r.schema, attr_type, object_type_id),
-			ObjectAttributeValues: []*models.ObjectPayloadAttributeValueScheme{
-				{
-					Value: attr_value.ValueString(),
-				},
-			},
-		})
+		attributes = append(attributes, returnAttributePayloadValue(attr_type, attr_value.ValueString(), r.objectSchemaAttributes[object_type_id.Id]))
 	}
 
 	// create payload
 	payload := &models.ObjectPayloadScheme{
-		ObjectTypeID: object_type_id,
+		ObjectTypeID: object_type_id.Id,
 		Attributes:   attributes,
 		HasAvatar:    plan.HasAvatar.ValueBool(),
 		AvatarUUID:   plan.AvatarUuid.ValueString(),
@@ -353,7 +358,7 @@ func (r *objectResource) Update(ctx context.Context, req resource.UpdateRequest,
 	tflog.Info(ctx, "Updating object.", map[string]interface{}{
 		"Id": plan.Id.ValueString(),
 	})
-	object, response, err := r.client.Object.Update(ctx, r.workspace_id, plan.Id.ValueString(), payload)
+	object, response, err := r.client.Object.Update(ctx, r.workspaceId, plan.Id.ValueString(), payload)
 	if err != nil {
 		if response != nil {
 			tflog.Error(ctx, "Error updating object: %s", map[string]interface{}{
@@ -399,7 +404,7 @@ func (r *objectResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	}
 
 	// Delete existing object
-	response, err := r.client.Object.Delete(ctx, r.workspace_id, state.Id.ValueString())
+	response, err := r.client.Object.Delete(ctx, r.workspaceId, state.Id.ValueString())
 	if err != nil {
 		if response != nil {
 			tflog.Error(ctx, "Error deleting object: %s", map[string]interface{}{
@@ -438,7 +443,9 @@ func (r *objectResource) Configure(ctx context.Context, req resource.ConfigureRe
 	}
 
 	r.client = providerClient.client
-	r.workspace_id = providerClient.workspaceId
-	r.schema = providerClient.schema
-	r.ignore_keys = providerClient.ignoreKeys
+	r.workspaceId = providerClient.workspaceId
+	r.objectschemaId = providerClient.objectschemaId
+	r.ignoreKeys = providerClient.ignoreKeys
+	r.objectSchemaTypes = providerClient.objectSchemaTypes
+	r.objectSchemaAttributes = providerClient.objectSchemaAttributes
 }
