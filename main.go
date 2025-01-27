@@ -8,7 +8,7 @@ import (
 	"flag"
 	"log"
 
-	"terraform-provider-jiraassets/internal/provider"
+	"terraform-provider-jira-assets/internal/provider"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 )
@@ -39,7 +39,7 @@ func main() {
 	flag.Parse()
 
 	opts := providerserver.ServeOpts{
-		Address: "registry.terraform.io/forevanyeung/jiraassets",
+		Address: "registry.terraform.io/eoprede/jira-assets",
 		Debug:   debug,
 	}
 

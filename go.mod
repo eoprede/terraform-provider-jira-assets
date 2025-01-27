@@ -1,4 +1,4 @@
-module terraform-provider-jiraassets
+module terraform-provider-jira-assets
 
 go 1.22.0
 
