@@ -3,7 +3,9 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log"
 	"slices"
+	"strings"
 
 	"github.com/ctreminiom/go-atlassian/assets"
 	"github.com/ctreminiom/go-atlassian/pkg/infra/models"
@@ -37,7 +39,8 @@ type objectResource struct {
 	objectschemaId         string
 	ignoreKeys             []string
 	objectSchemaTypes      []*models.ObjectTypeScheme
-	objectSchemaAttributes map[string][]*models.ObjectTypeAttributeScheme
+	objectSchemaAttributes []*models.ObjectTypeAttributeScheme
+	configStatusType       *[]StatusTypeMetadata
 }
 
 // Metadata returns the resource type name.
@@ -83,38 +86,63 @@ func getObjectTypeByName(objName string, schema []*models.ObjectTypeScheme) *mod
 	return &models.ObjectTypeScheme{}
 }
 
-func getObjectAttributeByName(objName string, schema []*models.ObjectTypeAttributeScheme) *models.ObjectTypeAttributeScheme {
+func getObjectAttributeByName(objName string, objectType string, schema []*models.ObjectTypeAttributeScheme) *models.ObjectTypeAttributeScheme {
 	for _, obj := range schema {
-		if obj.Name == objName {
+		if obj.Name == objName && obj.ObjectType.Name == objectType {
 			return obj
 		}
 	}
 	return &models.ObjectTypeAttributeScheme{}
 }
 
-func getAttributeValue(attr *models.ObjectAttributeScheme) (string, error) {
+func getAttributeValue(attr *models.ObjectAttributeScheme, statusType *[]StatusTypeMetadata) (string, error) {
 	switch attr.ObjectTypeAttribute.Type {
 	case 1:
 		return attr.ObjectAttributeValues[0].SearchValue, nil
 	case 0:
 		return attr.ObjectAttributeValues[0].Value, nil
 	case 7:
-		return attr.ObjectAttributeValues[0].Status.ID, nil
+		return getConfigStatusNameByID(attr.ObjectAttributeValues[0].Status.ID, statusType), nil
 	default:
 		return "", fmt.Errorf("unsupported attribute type: %d", attr.ObjectTypeAttribute.Type)
 	}
 }
 
-func returnAttributePayloadValue(name string, value string, objectSchemaAttributes []*models.ObjectTypeAttributeScheme) *models.ObjectPayloadAttributeScheme {
-	attrSchema := getObjectAttributeByName(name, objectSchemaAttributes)
+func returnAttributePayloadValue(name string, value string, objectType string, objectSchemaAttributes []*models.ObjectTypeAttributeScheme, statusType *[]StatusTypeMetadata) *models.ObjectPayloadAttributeScheme {
+	attrSchema := getObjectAttributeByName(name, objectType, objectSchemaAttributes)
+	val := value
+	if attrSchema.Type == 7 {
+		val = getConfigStatusIDByName(value, statusType)
+	}
 	return &models.ObjectPayloadAttributeScheme{
 		ObjectTypeAttributeID: attrSchema.ID,
 		ObjectAttributeValues: []*models.ObjectPayloadAttributeValueScheme{
 			{
-				Value: value,
+				Value: val,
 			},
 		},
 	}
+}
+
+func getConfigStatusIDByName(status string, statusType *[]StatusTypeMetadata) string {
+	statuses := []string{}
+	for _, statusType := range *statusType {
+		statuses = append(statuses, statusType.Name)
+		if statusType.Name == status {
+			return statusType.ID
+		}
+	}
+	log.Fatal("Unknown status, available statuses: ", strings.Join(statuses, ","))
+	return ""
+}
+
+func getConfigStatusNameByID(id string, statusType *[]StatusTypeMetadata) string {
+	for _, statusType := range *statusType {
+		if statusType.ID == id {
+			return statusType.Name
+		}
+	}
+	return ""
 }
 
 // Schema defines the schema for the resource.
@@ -204,7 +232,7 @@ func (r *objectResource) Create(ctx context.Context, req resource.CreateRequest,
 
 	var attributes []*models.ObjectPayloadAttributeScheme
 	for attr_type, attr_value := range elements {
-		attributes = append(attributes, returnAttributePayloadValue(attr_type, attr_value.ValueString(), r.objectSchemaAttributes[object_type_id.Id]))
+		attributes = append(attributes, returnAttributePayloadValue(attr_type, attr_value.ValueString(), object_type_id.Name, r.objectSchemaAttributes, r.configStatusType))
 	}
 
 	// create payload
@@ -303,7 +331,7 @@ func (r *objectResource) Read(ctx context.Context, req resource.ReadRequest, res
 		// and "updated". CI Class in my instance also messes up the state
 		ignore_keys := append([]string{"Created", "Key", "Updated"}, r.ignoreKeys...)
 		if !(slices.Contains(ignore_keys, attr.ObjectTypeAttribute.Name)) {
-			attributes[attr.ObjectTypeAttribute.Name], _ = getAttributeValue(attr)
+			attributes[attr.ObjectTypeAttribute.Name], _ = getAttributeValue(attr, r.configStatusType)
 		}
 	}
 	mapValue, _ := types.MapValueFrom(ctx, types.StringType, attributes)
@@ -343,7 +371,7 @@ func (r *objectResource) Update(ctx context.Context, req resource.UpdateRequest,
 	plan.Attributes.ElementsAs(ctx, &elements, false)
 	var attributes []*models.ObjectPayloadAttributeScheme
 	for attr_type, attr_value := range elements {
-		attributes = append(attributes, returnAttributePayloadValue(attr_type, attr_value.ValueString(), r.objectSchemaAttributes[object_type_id.Id]))
+		attributes = append(attributes, returnAttributePayloadValue(attr_type, attr_value.ValueString(), object_type_id.Name, r.objectSchemaAttributes, r.configStatusType))
 	}
 
 	// create payload
@@ -448,4 +476,5 @@ func (r *objectResource) Configure(ctx context.Context, req resource.ConfigureRe
 	r.ignoreKeys = providerClient.ignoreKeys
 	r.objectSchemaTypes = providerClient.objectSchemaTypes
 	r.objectSchemaAttributes = providerClient.objectSchemaAttributes
+	r.configStatusType = providerClient.configStatusType
 }

@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -49,24 +50,6 @@ type JiraAssetsProviderModel struct {
 	IgnoreKeys     []string     `tfsdk:"ignore_keys"`
 }
 
-// Some structures to hopefully pass schema to provider
-type Schema struct {
-	ID    string
-	Name  string
-	Types []Type
-}
-
-type Type struct {
-	ID         string
-	Name       string
-	Attributes []Attribute
-}
-
-type Attribute struct {
-	ID   string
-	Name string
-}
-
 // JiraAssetsProviderClient describes client and worksapceId.
 type JiraAssetsProviderClient struct {
 	client                 *assets.Client
@@ -74,32 +57,53 @@ type JiraAssetsProviderClient struct {
 	objectschemaId         string
 	ignoreKeys             []string
 	objectSchemaTypes      []*models.ObjectTypeScheme
-	objectSchemaAttributes map[string][]*models.ObjectTypeAttributeScheme
+	objectSchemaAttributes []*models.ObjectTypeAttributeScheme
+	configStatusType       *[]StatusTypeMetadata
 }
 
-func getObjectSchemaAttributes(asset *assets.Client, workSpaceID string, objectTypes []*models.ObjectTypeScheme) map[string][]*models.ObjectTypeAttributeScheme {
-	ret := make(map[string][]*models.ObjectTypeAttributeScheme)
-	options := &models.ObjectTypeAttributesParamsScheme{
-		OnlyValueEditable:       true,
-		OrderByName:             false,
-		Query:                   "",
-		IncludeValuesExist:      false,
-		ExcludeParentAttributes: false,
-		IncludeChildren:         true,
-		OrderByRequired:         false,
+type StatusTypeMetadata struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	Category       int    `json:"category"`
+	ObjectSchemaId string `json:"objectSchemaId"`
+}
+
+func getConfigStatusType(asset *assets.Client, workSpaceID string, schemaId string) *[]StatusTypeMetadata {
+	apiEndpoint := "/jsm/assets/workspace/" + workSpaceID + "/v1/config/statustype?objectSchemaId=" + schemaId
+
+	request, err := asset.NewRequest(context.Background(), http.MethodGet, apiEndpoint, "", nil)
+	if err != nil {
+		log.Fatal(err)
 	}
-	for _, objectType := range objectTypes {
-		attributes, response, err := asset.ObjectType.Attributes(context.Background(), workSpaceID, objectType.Id, options)
-		if err != nil {
-			if response != nil {
-				log.Println(response.Bytes.String())
-				log.Println("Endpoint:", response.Endpoint)
-			}
-			log.Fatal(err)
+
+	customResponseStruct := new([]StatusTypeMetadata)
+	response, err := asset.Call(request, &customResponseStruct)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if response.StatusCode == http.StatusOK {
+		return customResponseStruct
+	} else {
+		return nil
+	}
+}
+
+func getObjectSchemaAttributes(asset *assets.Client, workSpaceID string, schemaID string) []*models.ObjectTypeAttributeScheme {
+	options := &models.ObjectSchemaAttributesParamsScheme{
+		OnlyValueEditable: true,
+		Extended:          true,
+		Query:             "",
+	}
+	attributes, response, err := asset.ObjectSchema.Attributes(context.Background(), workSpaceID, schemaID, options)
+	if err != nil {
+		if response != nil {
+			log.Println(response.Bytes.String())
+			log.Println("Endpoint:", response.Endpoint)
 		}
-		ret[objectType.Id] = attributes
+		log.Fatal(err)
 	}
-	return ret
+	return attributes
 }
 
 func getObjectSchemaObjectTypes(asset *assets.Client, workSpaceID string, objsectSchemaID string) []*models.ObjectTypeScheme {
@@ -284,7 +288,8 @@ func (p *JiraAssetsProvider) Configure(ctx context.Context, req provider.Configu
 
 	// build shcme and attribute mappings
 	objectSchemaTypes := getObjectSchemaObjectTypes(client, workspaceId, objectschemaId)
-	objectSchemaAttributes := getObjectSchemaAttributes(client, workspaceId, objectSchemaTypes)
+	objectSchemaAttributes := getObjectSchemaAttributes(client, workspaceId, objectschemaId)
+	statusType := getConfigStatusType(client, workspaceId, objectschemaId)
 
 	// add workspaceId to response to be used by resources and data sources
 	providerClient := JiraAssetsProviderClient{
@@ -294,6 +299,7 @@ func (p *JiraAssetsProvider) Configure(ctx context.Context, req provider.Configu
 		ignoreKeys:             config.IgnoreKeys,
 		objectSchemaTypes:      objectSchemaTypes,
 		objectSchemaAttributes: objectSchemaAttributes,
+		configStatusType:       statusType,
 	}
 
 	resp.DataSourceData = providerClient
