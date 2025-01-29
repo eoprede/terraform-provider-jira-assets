@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"log"
 	"slices"
 	"strings"
 
@@ -108,11 +107,15 @@ func getAttributeValue(attr *models.ObjectAttributeScheme, statusType *[]StatusT
 	}
 }
 
-func returnAttributePayloadValue(name string, value string, objectType string, objectSchemaAttributes []*models.ObjectTypeAttributeScheme, statusType *[]StatusTypeMetadata) *models.ObjectPayloadAttributeScheme {
+func returnAttributePayloadValue(name string, value string, objectType string, objectSchemaAttributes []*models.ObjectTypeAttributeScheme, statusType *[]StatusTypeMetadata) (*models.ObjectPayloadAttributeScheme, error) {
 	attrSchema := getObjectAttributeByName(name, objectType, objectSchemaAttributes)
+	var err error
 	val := value
 	if attrSchema.Type == 7 {
-		val = getConfigStatusIDByName(value, statusType)
+		val, err = getConfigStatusIDByName(value, statusType)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &models.ObjectPayloadAttributeScheme{
 		ObjectTypeAttributeID: attrSchema.ID,
@@ -121,19 +124,18 @@ func returnAttributePayloadValue(name string, value string, objectType string, o
 				Value: val,
 			},
 		},
-	}
+	}, nil
 }
 
-func getConfigStatusIDByName(status string, statusType *[]StatusTypeMetadata) string {
+func getConfigStatusIDByName(status string, statusType *[]StatusTypeMetadata) (string, error) {
 	statuses := []string{}
 	for _, statusType := range *statusType {
 		statuses = append(statuses, statusType.Name)
 		if statusType.Name == status {
-			return statusType.ID
+			return statusType.ID, nil
 		}
 	}
-	log.Fatal("Unknown status, available statuses: ", strings.Join(statuses, ","))
-	return ""
+	return "", fmt.Errorf("unknown status, available statuses: " + strings.Join(statuses, ","))
 }
 
 func getConfigStatusNameByID(id string, statusType *[]StatusTypeMetadata) string {
@@ -232,7 +234,16 @@ func (r *objectResource) Create(ctx context.Context, req resource.CreateRequest,
 
 	var attributes []*models.ObjectPayloadAttributeScheme
 	for attr_type, attr_value := range elements {
-		attributes = append(attributes, returnAttributePayloadValue(attr_type, attr_value.ValueString(), object_type_id.Name, r.objectSchemaAttributes, r.configStatusType))
+		v, e := returnAttributePayloadValue(attr_type, attr_value.ValueString(), object_type_id.Name, r.objectSchemaAttributes, r.configStatusType)
+		if e != nil {
+			tflog.Error(ctx, e.Error())
+			resp.Diagnostics.AddError(
+				"Error during object attributes setting",
+				e.Error(),
+			)
+			return
+		}
+		attributes = append(attributes, v)
 	}
 
 	// create payload
@@ -371,7 +382,16 @@ func (r *objectResource) Update(ctx context.Context, req resource.UpdateRequest,
 	plan.Attributes.ElementsAs(ctx, &elements, false)
 	var attributes []*models.ObjectPayloadAttributeScheme
 	for attr_type, attr_value := range elements {
-		attributes = append(attributes, returnAttributePayloadValue(attr_type, attr_value.ValueString(), object_type_id.Name, r.objectSchemaAttributes, r.configStatusType))
+		v, e := returnAttributePayloadValue(attr_type, attr_value.ValueString(), object_type_id.Name, r.objectSchemaAttributes, r.configStatusType)
+		if e != nil {
+			tflog.Error(ctx, e.Error())
+			resp.Diagnostics.AddError(
+				"Error during object attributes setting",
+				e.Error(),
+			)
+			return
+		}
+		attributes = append(attributes, v)
 	}
 
 	// create payload

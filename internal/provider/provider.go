@@ -107,7 +107,7 @@ func getObjectSchemaAttributes(asset *assets.Client, workSpaceID string, schemaI
 }
 
 func getObjectSchemaObjectTypes(asset *assets.Client, workSpaceID string, objsectSchemaID string) []*models.ObjectTypeScheme {
-	schema, response, err := asset.ObjectSchema.ObjectTypes(context.Background(), workSpaceID, objsectSchemaID, false)
+	schema, response, err := asset.ObjectSchema.ObjectTypes(context.Background(), workSpaceID, objsectSchemaID, true)
 	if err != nil {
 		if response != nil {
 			log.Println(response.Bytes.String())
